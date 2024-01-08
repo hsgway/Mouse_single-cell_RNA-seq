@@ -1,0 +1,277 @@
+---
+title: "20220316_scRNAseq_CtrlvsInfected_SCT"
+output: html_document
+date: '2022-03-16'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(limma)
+library(tidyverse)
+library(patchwork)
+library(scCustomize)
+library(pals)
+```
+
+# load the object
+```{r}
+# Load the seurat object
+data.combined.sct <- readRDS("data/After_doublet_remover/data.seurat.sct_custom_mt20.rds")
+
+data.combined.sct$seurat_clusters <- data.combined.sct$integrated_snn_res.0.4
+
+Idents(data.combined.sct) <- "seurat_clusters.ann"
+```
+
+
+###### Identify marker genes ######
+
+# preprocessing
+```{r}
+data.combined.sct <- PrepSCTFindMarkers(data.combined.sct) # The counts slot of the SCT assay is replaced with recorrected counts and the data slot is replaced with log1p of recorrected counts. Corrected counts are obtained by setting the sequencing depth for all the cells to a fixed value and reversing the learned regularized negative-binomial regression model.
+```
+
+# save the object
+```{r}
+# Save the seurat object
+saveRDS(data.combined.sct, "data/After_doublet_remover/data.seurat.sct.PrepSCTFindMarkers_custom_mt20.rds")
+```
+
+
+# find conserved cell type markers in all conditions (takes long time without limma package)
+# some cases you will have clusters that do not have enough cells for a particular group - and your function will fail. For these clusters you will need to use FindAllMarkers().
+# To run differential expression, we make use of ‘corrected counts’ that are stored in the data slot of the the SCT assay
+```{r}
+## specific cluster (vs all other clusters or vs specific cluster)
+# specify the cluster
+cluster = 13
+
+# find marker genes (vs all other clusters or vs specific cluster)
+cc.markers <- FindConservedMarkers(data.combined.sct, assay = "SCT", ident.1=cluster, ident.2=NULL, grouping.var = "orig.ident", verbose = FALSE)
+
+
+## all clusters (vs other clusters)
+# find conserved marker genes for all clusters
+# create gene list dataframe
+annotations <- data.frame(gene_name=rownames(data.combined.sct))
+
+# create function to get conserved markers for any given cluster
+get_conserved <- function(cluster){
+  FindConservedMarkers(data.combined.sct,
+                       assay = "SCT",
+                       ident.1 = cluster,
+                       grouping.var = "orig.ident",
+                       verbose = FALSE) %>%
+    rownames_to_column(var = "gene") %>%
+    cbind(cluster_id = cluster, .)
+  }
+
+# execute
+n = length(levels(data.combined.sct$seurat_clusters))
+cc.markers.all <- map_dfr(0:(n-1), get_conserved)
+
+# write the result
+filename = "all_conservedmarkers.csv"
+write.csv(cc.markers.all, filename, quote = F, row.names=F)
+```
+
+# find all cluster marker (takes long time without limma package)
+```{r}
+# find all cluster markers 
+# only.pos=T only returns positive markers
+# min.pct is the minimum percentage of the cells expressing the gene in the cluster
+# min.diff.pct is the minimum difference between the two groups (group2 contains all other cells)
+# logfc.threshold is minimum log2 fold change (default is 0.25)
+# p-value = 0 means the value is less than R limits
+c.markers.all <- FindAllMarkers(data.combined.sct, assay = "SCT", only.pos = FALSE, min.pct = 0.25, min.diff.pct = 0.25, logfc.threshold = 0.25, test.use = "wilcox")
+
+# write the result
+c.markers.all$gene <- gsub("\\.[0-9]*", "", rownames(c.markers.all))
+c.markers.all <- c.markers.all %>% select(gene, everything())
+
+colnames(c.markers.all)[4:5] <- c("pct.cluster", "pct.others")
+filename = "all_cluster_markers_custom_mt20.csv"
+
+write.csv(c.markers.all, filename, quote = F, row.names=F)
+```
+
+
+### figures
+# read data
+```{r}
+c.markers <- read.csv("../20230825_Infant_VC_P5_EpiscRNAseq_mt_filter_20/all_cluster_markers_custom_mt20.csv", header=TRUE)
+```
+
+# rename the cluster
+```{r}
+data.combined.sct <- RenameIdents(data.combined.sct, 
+                                  `0` = "0_Enterocyte", 
+                                  `1` = "1_Enterocyte", 
+                                  `2` = "2_Enterocyte", 
+                                  `3` = "3_Enterocyte", 
+                                  `4` = "4_Enterocyte", 
+                                  `5` = "5_Enterocyte", 
+                                  `6` = "6_Enterocyte", 
+                                  `7` = "7_Enterocyte", 
+                                  `8` = "8_TA", 
+                                  `9` = "9_Enterocyte",
+                                  `10` = "10_Goblet", 
+                                  `11` = "11_Stem", 
+                                  `12` = "12_EEC", 
+                                  `13` = "13_EEC")
+
+data.combined.sct$seurat_clusters.ann <- Idents(data.combined.sct)
+```
+
+# UMAP with annotation
+```{r}
+Idents(data.combined.sct) <- 
+
+my.cols <- unname(polychrome(length(levels(data.combined.sct$seurat_clusters.ann))))
+my.cols <- my.cols[c(1,2,12,5,3,4,6,8,7,9:11,13,14)]
+
+DimPlot(data.combined.sct, reduction = "umap", group.by = "seurat_clusters.ann" , cols = my.cols, label = T) & ggtitle("")
+
+DimPlot(data.combined.sct, reduction = "umap", group.by = "orig.ident", cols = my.cols) # 5x6
+
+DimPlot(data.combined.sct, reduction = "umap", group.by = "seurat_clusters.ann", cols = my.cols, split.by ="orig.ident") & ggtitle("") # 5x16
+
+prox <- DimPlot(subset(data.combined.sct, subset = orig.ident %in% c("Mock.prox", "Infected.prox")), reduction = "umap", group.by = "seurat_clusters.ann", cols = my.cols, split.by ="orig.ident") & ggtitle("")
+
+dis <- DimPlot(subset(data.combined.sct, subset = orig.ident %in% c("Mock.dis", "Infected.dis")), reduction = "umap", group.by = "seurat_clusters.ann", cols = my.cols, split.by ="orig.ident") & ggtitle("")
+
+prox / dis + plot_layout(guides = "collect")
+```
+
+# save the object
+```{r}
+# Save the seurat object
+saveRDS(data.combined.sct, "data/After_doublet_remover/data.seurat.sct.PrepSCTFindMarkers_custom_mt20.rds")
+```
+
+# dotplot and heatmap
+```{r}
+# select top 3 genes
+genes.can.list <- subset(c.markers, abs(avg_log2FC) > 0.5 & p_val_adj < 10^-10 & (pct.cluster - pct.others) > 0.25)
+
+genes.top5.list <- genes.can.list %>% group_by(cluster) %>% top_n(5, avg_log2FC) %>% select(gene)
+
+genes <- unique(genes.top5.list$gene)
+
+# dotplot
+# switch the default assay
+DefaultAssay(data.combined.sct) <- "SCT"
+
+DotPlot_scCustom(data.combined.sct, features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high, cluster.idents = F) #7x12.5
+
+DotPlot_scCustom(data.combined.sct, features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high, cluster.idents = T) #7x12
+
+# heatmap
+library(viridis)
+DoHeatmap(data.combined.sct, features = genes) + scale_fill_viridis(option="magma")
+```
+
+# dotplot and heatmap (cluster 3 genes)
+```{r}
+# select top 3 genes
+genes.can.list <- subset(c.markers, cluster == 3 & abs(avg_log2FC) > 0.25 & p_val_adj < 10^-10 & (pct.cluster - pct.others) > 0.25)$gene
+
+# dotplot
+# switch the default assay
+DefaultAssay(data.combined.sct) <- "SCT"
+
+DotPlot_scCustom(data.combined.sct, features = rev(genes.can.list), flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high, cluster.idents = F) #6.5x8
+
+DotPlot_scCustom(data.combined.sct, features = rev(genes.can.list), flip_axes = T, x_lab_rotate = TRUE, colors_use=cubicl(10), cluster.idents = F) #6.5x8
+```
+
+
+
+
+# Feature plot
+```{r}
+# switch the default assay
+DefaultAssay(data.combined.sct) <- "SCT"
+
+# Cell type markers
+genes = c("Olfm4", "Mki67", "Alpi", "Enpp3", "Ada", "Muc2", "Chga", "Lyz1", "Dclk1")
+
+FeaturePlot_scCustom(data.combined.sct, features = genes, num_columns = 5) & theme(legend.position = "right") # 5 x 15
+# ggsave("UMAP_markers_mt20.png", dpi=300, width=15, height=5)
+
+VlnPlot(data.combined.sct, features = genes) #8x12, data slot contains log normalized data
+# ggsave("Violin_filter.png", dpi=300, width=14, height=8)
+```
+
+# Intestinal zonation
+# normalization (RNA slot)
+# the merged data must be normalized and scaled (but you only need to scale the variable genes)
+```{r}
+# switch to RNA slot
+DefaultAssay(data.combined.sct) <- "RNA"
+
+# data normalization (normalize the count for each cell)
+# LogNormalize: Feature counts for each cell are divided by the total counts for that cell and multiplied by the scale.factor. This is then natural-log transformed using log1p.
+data.combined.sct <- NormalizeData(data.combined.sct, normalization.method = "LogNormalize", scale.factor = 10000) # normalized values are stored in data slot of RNA assay (data.sub[["RNA"]]@data)
+
+# find highly variable genes (nfeatures (not used here) is the number of genes that you want. default is 2000)
+data.combined.sct <- FindVariableFeatures(data.combined.sct, selection.method = "vst")
+
+# Scales and centers
+data.combined.sct <- ScaleData(data.combined.sct) # scaled values are stored in scale.data slot of RNA assay
+```
+
+
+```{r}
+library(UCell)
+
+# switch to count data
+DefaultAssay(data.combined.sct) <- "RNA"
+
+data.combined.sct$orig.ident <- factor(data.combined.sct$orig.ident, levels=c("Mock.prox","Infected.prox","Mock.dis","Infected.dis"))
+
+#landmark genes 
+bottom_landmark <- c("2010107E04Rik", "2210407C18Rik", "Atp5a1", "Atp5e", "Atp5g3", "Atp5h", "Atp5j", "Atp5j2", "Atp5l", "Atp5o", "Atpif1", "Ccl25", "Chchd10", "Ckmt1", "Cox4i1", "Cox5a", "Cox5b", "Cox6b1", "Cox6c", "Cox7a1", "Cox7a2", "Cox7b", "Fabp1", "Gpx2", "Gsta1", "Lgals4", "Lypd8", "Minos1", "Ndufa1", "Ndufa4", "Ndufa5", "Ndufb6", "Ndufb8", "Ndufc1", "Plac8", "Reg3b", "Reg3g", "Rpl18", "Rpl35a", "Rpl38", "Rpl39", "Rpl41", "Rplp1", "Rps12", "Rps14", "Rps18", "Rps2", "Rps27", "Rps27l", "Rps28", "Rps29", "Rps8", "Sis", "Spink4", "Tm4sf5", "Tma7", "Txn1", "Uba52", "Uqcr10", "Uqcr11", "Uqcrh", "Uqcrq")
+
+
+top_landmark <- c("2010109I03Rik", "Acad9", "Ada", "Ap1g1", "Apoa4", "Apoc3", "Cep57", "Cfap20", "Chchd1", "Chek2", "Clca4a", "Cldn7", "Fgd4", "Gcn1l1", "Glipr1", "Gm10680", "Gm20594", "Ifrd1", "Krt20", "Lgals3", "Lrrc41", "Mrpl48", "Myo7a", "Olfr1385", "Olfr46", "Pam", "Pkib", "Pmp22", "Psma7", "Rab34", "S100a10", "S100a6", "Serpinb1a", "Slc17a5", "Slc25a22", "Slc28a2", "Sprr2a2", "Ssbp2", "Tbk1", "Tlr1", "Tmsb4x", "Ythdc2", "Zfp280d")
+
+
+bottom_landmark <- bottom_landmark[bottom_landmark %in% row.names(data.combined.sct)]
+top_landmark <- top_landmark[top_landmark %in% row.names(data.combined.sct)]
+
+signatures <- list(top.landmark=top_landmark, bottom.landmark=bottom_landmark)
+
+data.combined.sct <- AddModuleScore_UCell(data.combined.sct, features=signatures, name=NULL)
+
+FeaturePlot(data.combined.sct, features = names(signatures)) & scale_colour_gradientn(colours = cubicl(20), name = "UCell score") #4x10
+
+# ggsave("UCellscore_zonation_mt20.png", dpi=300, width=10, height=4) # save the figure
+
+
+FeaturePlot(subset(data.combined.sct, subset = orig.ident %in% c("Mock.prox", "Infected.prox")), features = names(signatures), split.by="orig.ident", ncol=2) & scale_colour_gradientn(colours = cubicl(20), name = "UCell score") # 6x7
+
+# ggsave("UCellscore_zonation_prox_mt20.png", dpi=300, width=7, height=6) # save the figure
+
+FeaturePlot(subset(data.combined.sct, subset = orig.ident %in% c("Mock.dis", "Infected.dis")), features = names(signatures), split.by="orig.ident", ncol=2) & scale_colour_gradientn(colours = cubicl(20), name = "UCell score")
+
+# ggsave("UCellscore_zonation_dis_mt20.png", dpi=300, width=7, height=6) # save the figure
+```
+
+```{r}
+colnames(data.combined.sct[[]])
+
+DefaultAssay(data.combined.sct) <- "SCT"
+
+#count.data <- GetAssayData(data.combined.sct, assay = "SCT", slot = "data")
+
+genes <- c("Lgr5", "Reg3b")
+
+df <- FetchData(data.combined.sct, vars = c("orig.ident", genes,"bottom.landmark","top.landmark"), slot="data")
+
+ggplot(df, aes(top.landmark, Reg3b, color=orig.ident)) + geom_point() + facet_grid(orig.ident ~ .)
+ggplot(df, aes(bottom.landmark, Reg3b, color=orig.ident)) + geom_point() + facet_grid(orig.ident ~ .) + ylim(0,8)
+```
+

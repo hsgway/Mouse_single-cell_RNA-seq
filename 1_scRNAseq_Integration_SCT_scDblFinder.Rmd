@@ -1,0 +1,402 @@
+---
+title: "scRNA-seq Integrarion"
+output: html_document
+date: '2023-09-11'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(limma)
+library(tidyverse)
+library(patchwork)
+library(scDblFinder)
+library(scCustomize)
+```
+
+# read data
+```{r}
+mock.prox.data <- Read10X_h5("mock_proximal_custom_filtered_feature_bc_matrix.h5", use.names = TRUE, unique.features = TRUE)
+
+mock.dis.data <- Read10X_h5("mock_distal_custom_filtered_feature_bc_matrix.h5", use.names = TRUE, unique.features = TRUE)
+
+infected.prox.data <- Read10X_h5("infected_proximal_custom_filtered_feature_bc_matrix.h5", use.names = TRUE, unique.features = TRUE)
+
+infected.dis.data <- Read10X_h5("infected_distal_custom_filtered_feature_bc_matrix.h5", use.names = TRUE, unique.features = TRUE)
+```
+
+# create seurat objects
+```{r}
+mock.prox <- CreateSeuratObject(counts = mock.prox.data, project="Mock.prox")
+mock.dis <- CreateSeuratObject(counts = mock.dis.data, project="Mock.dis")
+infected.prox <- CreateSeuratObject(counts = infected.prox.data, project="Infected.prox")
+infected.dis <- CreateSeuratObject(counts = infected.dis.data, project="Infected.dis")
+```
+
+# remove files
+```{r}
+rm(mock.prox.data)
+rm(mock.dis.data)
+rm(infected.prox.data)
+rm(infected.dis.data)
+```
+
+# run scDblFinder
+# For 10x data, it is usually safe to leave the dbr empty, and it will be automatically estimated
+```{r}
+set.seed(1234)
+
+seurat.list <- list(mock.prox, mock.dis, infected.prox, infected.dis)
+names(seurat.list) <- c("mock.prox", "mock.dis", "infected.prox", "infected.dis")
+
+for(i in 1:length(seurat.list)){
+  se <- seurat.list[[i]]
+  sce <- as.SingleCellExperiment(se)
+  sce$cluster <- fastcluster(sce)
+  sce <- scDblFinder(sce, clusters=TRUE)
+  se$scDblFinder.score <- sce$scDblFinder.score # port the resulting scores back to the Seurat object
+  se$scDblFinder.class <- sce$scDblFinder.class # port the resulting scores back to the Seurat object
+  assign(names(seurat.list)[i], se)
+}
+
+# check cell numbers
+table(mock.prox$scDblFinder.class)
+table(mock.dis$scDblFinder.class)
+table(infected.prox$scDblFinder.class)
+table(infected.dis$scDblFinder.class)
+```
+
+# Another option: run scDblFinder (multiple samples, do not use this code when your samples have large differences in number of the cells)
+# For 10x data, it is usually safe to leave the dbr empty, and it will be automatically estimated
+```{r}
+#set.seed(1234)
+
+#epi <- merge(mock.prox, y = c(mock.dis, infected.prox, infected.dis), add.cell.ids = c("mock.prox", "mock.dis", "infected.prox", "infected.dis"), project = "epi")
+
+#se <- epi
+#sce <- as.SingleCellExperiment(se)
+
+#library(BiocParallel)
+#sce <- scDblFinder(sce, samples=names(seurat.list), BPPARAM=MulticoreParam(3))
+#table(sce$scDblFinder.class)
+
+#sce <- scDblFinder(GetAssayData(se, slot="counts"), clusters=Idents(se))
+# port the resulting scores back to the Seurat object:
+#se$scDblFinder.score <- sce$scDblFinder.score
+```
+
+# remove doublet
+```{r}
+seurat.list <- list(mock.prox, mock.dis, infected.prox, infected.dis)
+names(seurat.list) <- c("mock.prox", "mock.dis", "infected.prox", "infected.dis")
+
+for(i in 1:length(seurat.list)){
+  se <- subset(x = seurat.list[[i]], subset = scDblFinder.class == "singlet")
+  assign(names(seurat.list)[i], se)
+}
+```
+
+# merge data
+```{r}
+# cell id (project id)
+cell.ids = c("Mock.prox", "Mock.dis", "Infected.prox", "Infected.dis")
+
+# merge the seurat objects
+#By default, merge() will combine the Seurat objects based on the raw count matrices, erasing any previously normalized and scaled data matrices. If you want to merge the normalized data matrices as well as the raw count matrices, simply pass merge.data = TRUE. This should be done if the same normalization approach was applied to all objects.
+data <- merge(mock.prox, c(mock.dis, infected.prox, infected.dis), add.cell.ids = cell.ids, merge.data = FALSE)
+
+# check the seurat object
+table(data$orig.ident) # cell numbers
+head(colnames(data)) # cell names
+head(rownames(data)) # gene names
+head(colnames(data[[]])) # cell-level meta data
+names(data) # pull a vector names of Assay, DimReduction and Graph objects
+head(Idents(data)) # cell identities
+tail(Idents(data)) # cell identities
+
+# reorder orig.ident
+data$orig.ident <- factor(x = data$orig.ident, levels = c("Mock.prox", "Mock.dis", "Infected.prox", "Infected.dis"))
+
+table(data$orig.ident) # cell numbers
+```
+
+# set color scheme
+```{r}
+library(RColorBrewer)
+n = length(cell.ids)
+colors = brewer.pal(n = n, "Set1")
+```
+
+#QC
+```{r}
+# check the metadata
+colnames(data[[]])
+
+# percentage of mitochondrial gene counts
+data[["percent.mt"]] <- PercentageFeatureSet(data, pattern = "^mt-")
+
+# create violin plot (number of genes)
+VlnPlot(data, "nFeature_RNA", group.by = "orig.ident", cols=colors)
+
+# create violin plot (number of genes, UMI counts, mito percentages)
+VlnPlot(data, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), group.by = "orig.ident", cols=colors, ncol = 3) # 8x12
+
+#ggsave("QC_custom.png", dpi=300, width=12, height=6) # save the figure
+```
+
+# filter cells
+```{r}
+# filter cells that have unique feature counts less than 200
+data.sub <- subset(data, subset = nFeature_RNA > 200 & nCount_RNA > 1000 & percent.mt < 20)
+
+table(data.sub$orig.ident)
+```
+
+
+###### analysis without data integration ######
+
+# normalization (~ 20 min for 4 files 60K cells)
+```{r}
+# data normalization (normalize the count for each cell)
+# sctansformation, Transformed data will be available in the SCT assay, which is set as the default after running sctransform
+data.sub <- SCTransform(data.sub, vst.flavor = "v2", verbose = FALSE)
+```
+
+# check assay
+```{r}
+# check the assay object
+Assays(data.sub)
+
+DefaultAssay(data.sub) # default should be "SCT"
+```
+
+# dimension reduction (PCA)
+```{r}
+# Do PCA on data including only the variable genes
+# npcs is the total number of PCs to compute 
+# ndims.print is the PCs to print genes for
+# nfeatures.print is the number of genes to print for each PC
+data.sub <- RunPCA(data.sub, verbose = FALSE)
+
+# Elbow plot
+ElbowPlot(data.sub)
+
+# check the loading genes
+VizDimLoadings(data.sub, dims = 1:2, reduction = "pca")
+
+# PCA plot
+DimPlot(data.sub, reduction = "pca", dims = c(1, 2), group.by = "orig.ident", split.by = "orig.ident", cols = colors) # 6x8
+```
+
+# cluster the cells (graph-based clustering)
+```{r}
+# set the resolution
+r = 0.5
+
+# construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods
+data.sub <- FindNeighbors(data.sub, reduction = "pca", dims = 1:30)
+
+# clustering
+data.sub <- FindClusters(data.sub, resolution = r)
+
+# look at cluster IDs of the first 5 cells
+head(Idents(data.sub), 5)
+
+# check metadata
+colnames(data.sub[[]])
+```
+
+# UMAP
+```{r}
+# create a UMAP visualization.
+data.sub <- RunUMAP(data.sub, dims = 1:30, verbose = FALSE)
+
+DimPlot(data.sub, reduction = "umap", group.by = "seurat_clusters")
+
+DimPlot(data.sub, reduction = "umap", group.by = "orig.ident", cols = colors) # 5x6
+
+DimPlot(data.sub, reduction = "umap", group.by = "orig.ident", cols = colors, split.by ="orig.ident") # 5x6
+```
+
+# violin and feature plot
+```{r}
+# violin plot
+VlnPlot(data.sub, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), group.by = "seurat_clusters")
+
+# feature plot
+genes = c("Ncr1", "Klrb1c", "Il7r", "Tbx21", "Itga1", "Il2rb")
+FeaturePlot(data.sub, features = genes, slot = "data", order = FALSE, ncol = 3) & theme(legend.position = "right") # data contains log-transformed version of counts #8x13
+```
+
+
+
+###### integration (batch correction) ######
+
+# normalization (~15 min for 4 files 60K cells)
+```{r}
+# split the dataset into a list of two seurat objects
+# if you did not perform filtering, use "data" instead of "data.sub"
+data.list <- SplitObject(data.sub, split.by = "orig.ident")
+
+# SCT (sctransform), this single command replaces NormalizeData(), ScaleData(), and FindVariableFeatures()
+data.list <- lapply(data.list, function(x) {
+    x <- SCTransform(x, method = "glmGamPoi", vst.flavor = "v2", verbose = FALSE)
+})
+```
+
+# integration (canonical correlation analysis + mutual nearest neighbors)
+```{r}
+# select features (genes) that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = data.list, nfeatures = 3000) # the manual recommends nfeatures >= 3000
+
+data.list <- PrepSCTIntegration(object.list = data.list, anchor.features = features)
+
+# integration
+# Identify anchors on the datasets, commonly shared variable genes across samples,
+# and integrate samples.
+data.anchors <- FindIntegrationAnchors(object.list = data.list, anchor.features = features, normalization.method = "SCT")
+
+# creates an 'integrated' data assay
+# If normalization.method = "LogNormalize", the integrated data is returned to the data slot and can be treated as log-normalized, corrected data. 
+# If normalization.method = "SCT", the integrated data is returned to the scale.data slot and can be treated as centered, corrected Pearson residuals
+data.combined.sct <- IntegrateData(anchorset = data.anchors, normalization.method = "SCT")
+```
+
+# check assay
+```{r}
+# check the assay object
+Assays(data.combined.sct)
+
+DefaultAssay(data.combined.sct) # default should be "integrated"
+```
+
+```{r}
+# reorder orig.ident
+data.combined.sct$orig.ident <- factor(x = data.combined.sct$orig.ident, levels = c("Mock.prox", "Infected.prox", "Mock.dis", "Infected.dis"))
+```
+
+
+# dimension reduction (PCA)
+```{r echo=TRUE}
+# PCA, npcs is the number of pc
+data.combined.sct <- RunPCA(data.combined.sct, npcs = 50, verbose = FALSE)
+
+# Elbow plot
+ElbowPlot(data.combined.sct, ndims = 30)
+
+# check the loading genes
+VizDimLoadings(data.combined.sct, dims = 1:2, reduction = "pca")
+
+# PCA plot
+DimPlot(data.combined.sct, reduction = "pca", dims = c(1, 2), group.by = "orig.ident", split.by = "orig.ident", cols = colors) # 6x8
+```
+
+# clustering (graph-based)
+```{r}
+# construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods
+data.combined.sct <- FindNeighbors(data.combined.sct, reduction = "pca", dims = 1:15)
+```
+
+# clustree (optimize resolution)
+```{r}
+# Select a range of resolutions
+resolution.range <- seq(from = 0, to = 1, by = 0.2)
+
+# Find clusters using a range of resolutions
+data.combined.sct <- FindClusters(data.combined.sct, resolution = resolution.range)
+
+# clustree figure
+library(clustree)
+
+clustree(data.combined.sct@meta.data, prefix = "integrated_snn_res.") # 8 x 8
+```
+
+# set resolution
+```{r}
+# set the resolution
+r = 0.4
+
+res.col <- paste0("integrated_snn_res.", r)
+
+Idents(data.combined.sct) <- res.col
+data.combined.sct$seurat_clusters <- data.combined.sct[[res.col]]
+```
+
+# UMAP
+```{r}
+#UMAP
+data.combined.sct <- RunUMAP(data.combined.sct, reduction = "pca", dims = 1:15, n.neighbors = 15, min.dist = 0.3, spread = 1, metric = "euclidean")
+
+# visualization
+# change the order
+data.combined.sct$orig.ident <- factor(data.combined.sct$orig.ident, levels=c("Mock.prox", "Infected.prox", "Mock.dis", "Infected.dis"))
+
+DimPlot(data.combined.sct, reduction = "umap", group.by = "orig.ident", cols = colors)
+
+DimPlot(data.combined.sct, reduction = "umap", label=TRUE)
+
+DimPlot(data.combined.sct, reduction = "umap", group.by = "seurat_clusters", split.by = "orig.ident", label=TRUE) # 5x12
+
+DimPlot(data.combined.sct, reduction = "umap", group.by = "integrated_snn_res.0.4", split.by = "orig.ident", label=TRUE) # 5x12
+```
+
+# change the colors of the clusters on UMAP
+```{r}
+n = length(unique(data.combined.sct$seurat_clusters))
+
+my_col <- DiscretePalette_scCustomize(num_colors = n, palette = "polychrome")
+my_col <- my_col[c(1,2,12,5,3,4,6,8,7,9:11,13,14)]
+
+DimPlot(subset(data.combined.sct, subset=orig.ident%in%c("Mock.prox","Mock.dis")), reduction = "umap", label = TRUE, repel = TRUE, group.by = 'seurat_clusters', cols = my_col) # 5.5 x 6
+
+DimPlot(data.combined.sct, reduction = "umap", label = TRUE, repel = TRUE, group.by = 'seurat_clusters', split.by = "orig.ident", cols = my_col) # 5.5 x 16
+```
+
+
+# Marker gene expression (Violin plot and feature plot)
+```{r}
+DefaultAssay(data.combined.sct) <- "SCT"
+
+# violin plot
+VlnPlot(data.combined.sct, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), slot = "data")
+#ggsave("QC_clusters_custom.png", dpi=300, width=18, height=6)
+
+# marker genes expression
+genes = c("Lgr5", "Olfm4", "Kcne3")
+genes = c("Muc2", "Spdef", "Atoh1")
+genes = c("Mmp7", "Lyz1", "Defa17")
+genes = c("Dclk1", "Cd24a", "Pou2f3")
+genes = c("Fgf1", "Adm")
+genes = c("Chga", "Cpe", "Pyy")
+
+FeaturePlot(data.combined.sct, features = genes, slot = "data", split.by = "orig.ident", order = FALSE) & theme(legend.position = "right") # data contains log-transformed version of counts #8x14
+
+
+# Cell type markers
+genes = c("Olfm4", "Mki67", "Alpi", "Enpp3", "Ada", "Muc2", "Chga", "Lyz1", "Dclk1")
+
+#FeaturePlot(data.combined.sct, features = genes, slot = "data", order = FALSE) & theme(legend.position = "right") # data contains log-transformed version of counts #8x9.5
+
+FeaturePlot_scCustom(data.combined.sct, features = genes, num_columns = 2) & theme(legend.position = "right") # 6 x 12
+# ggsave("UMAP_markers.png", dpi=300, width=6, height=12)
+
+VlnPlot(data.combined.sct, features = genes) #8x12, data slot contains log normalized data
+# ggsave("Violin_filter.png", dpi=300, width=14, height=8)
+
+
+# Regional markers
+genes = c("Mme", "Cym", "Fgf15", "Bex4")
+
+FeaturePlot_scCustom(subset(data.combined.sct, subset=orig.ident==c("Mock.prox", "Mock.dis")), split.by = "orig.ident", features = genes, num_columns = 2) & theme(legend.position = "right") # 7.5 x 12
+# ggsave("UMAP_prox_dis.png", dpi=300, width=7.5, height=12)
+```
+
+# save the object
+```{r}
+dir.create("data/After_doublet_remover")
+
+# Save the seurat object
+saveRDS(data.combined.sct, "data/After_doublet_remover/data.seurat.sct_custom_mt20.rds")
+saveRDS(data.anchors, "data/After_doublet_remover/data.anchors.sct_custom_mt20.rds")
+```

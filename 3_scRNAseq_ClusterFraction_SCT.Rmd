@@ -1,0 +1,201 @@
+---
+title: "20220316_scRNAseq_CtrlvsInfected_SCT"
+output: html_document
+date: '2022-03-16'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(limma)
+library(tidyverse)
+library(patchwork)
+library(reshape2)
+```
+
+# load the object
+```{r}
+# Load the split seurat object into the environment
+data.combined.sct <- readRDS("data/After_doublet_remover/data.seurat.sct.PrepSCTFindMarkers_custom_mt20.rds")
+
+data.combined.sct$seurat_clusters <- data.combined.sct$integrated_snn_res.0.4
+
+Idents(data.combined.sct) <- "integrated_snn_res.0.4"
+```
+
+# reorder cluster
+```{r}
+cluster.levels <- levels(data.combined.sct$seurat_clusters.ann)[c(12,9,1:8,10,11,13,14)]
+
+data.combined.sct$seurat_clusters.ann <- factor(data.combined.sct$seurat_clusters.ann, levels=cluster.levels)
+```
+
+# number of the cells in each cluster
+```{r}
+table.num <- table(data.combined.sct$seurat_clusters.ann, data.combined.sct$orig.ident)
+#write.csv(table.num, file="cluster_cell_number_custom_mt20.csv")
+```
+
+# percentage of the cells in each cluster
+```{r}
+# all
+All <- round(prop.table(table(data.combined.sct$seurat_clusters.ann))*100,1)
+
+# Mock
+Mock.proximal <- round(prop.table(table(subset(data.combined.sct, subset=orig.ident=="Mock.prox")$seurat_clusters.ann))*100,1)
+Mock.distal <- round(prop.table(table(subset(data.combined.sct, subset=orig.ident=="Mock.dis")$seurat_clusters.ann))*100,1)
+
+# Infected
+Infected.proximal <- round(prop.table(table(subset(data.combined.sct, subset=orig.ident=="Infected.prox")$seurat_clusters.ann))*100,1)
+Infected.distal <- round(prop.table(table(subset(data.combined.sct, subset=orig.ident=="Infected.dis")$seurat_clusters.ann))*100,1)
+
+# summary
+table <- rbind(All, Mock.proximal, Mock.distal, Infected.proximal, Infected.distal)
+#write.csv(table, file="cluster_percentage_custom_mt20.csv")
+```
+
+# fold change (prox vs dis)
+```{r}
+# mock prox vs mock dis 
+Ratio <- table["Mock.proximal",]/table["Mock.distal",]
+
+table.fc <- as.data.frame(Ratio) %>% rownames_to_column(var="Cluster")
+table.fc$Cluster <- factor(table.fc$Cluster, levels=cluster.levels)
+
+ggplot(table.fc, aes(Cluster, Ratio)) + geom_bar(stat = "identity",  width = 0.4, position=position_dodge(width = 0.5)) + scale_fill_manual("grey60") + geom_hline(yintercept=1,linetype=2) + ylab("Ratio (Prox/Dis)") + ylim(0,2) + theme_bw() + theme(axis.text.x = element_text(angle = 45, vjust = 0.8, hjust= 0.8)) # 3 x 4 
+```
+
+# fold change (infected vs mock)
+```{r}
+# mock prox vs infected prox
+Ratio <- table["Infected.proximal",]/table["Mock.proximal",]
+
+table.fc <- as.data.frame(Ratio) %>% rownames_to_column(var="Cluster")
+table.fc$Cluster <- factor(table.fc$Cluster, levels=cluster.levels)
+
+p1 <- ggplot(table.fc, aes(Cluster, Ratio)) + geom_bar(stat = "identity",  width = 0.4, position=position_dodge(width = 0.5)) + scale_fill_manual("grey60") + theme_bw() + geom_hline(yintercept=1,linetype=2, color="firebrick2") + ylab("Ratio (Infected/Mock)") + ggtitle("Proximal") + theme(axis.text.x = element_text(angle = 45, vjust = 0.8, hjust= 0.8)) + ylim(0,2) # 4 x 8 
+
+
+# mock prox vs infected prox
+Ratio <- table["Infected.distal",]/table["Mock.distal",]
+
+table.fc <- as.data.frame(Ratio) %>% rownames_to_column(var="Cluster")
+table.fc$Cluster <- factor(table.fc$Cluster, levels=cluster.levels)
+
+p2 <- ggplot(table.fc, aes(Cluster, Ratio)) + geom_bar(stat = "identity",  width = 0.4, position=position_dodge(width = 0.5)) + scale_fill_manual("grey60") + theme_bw() + geom_hline(yintercept=1,linetype=2, color="firebrick2") + ylab("Ratio (Infected/Mock)") + ggtitle("Distal") + theme(axis.text.x = element_text(angle = 45, vjust = 0.8, hjust= 0.8))
+
+p1/ p2 # 4 x 5
+```
+
+# bar chart 
+```{r}
+library(reshape2)
+
+table.bar <- rownames_to_column(as.data.frame(t(table)), var="cluster")
+
+# proximal
+table.bar.prox <- table.bar %>% select(cluster, contains("proximal"))
+table.bar.prox <- melt(table.bar.prox)
+colnames(table.bar.prox) <- c("Cluster", "Condition", "Percentage")
+table.bar.prox$Cluster <- factor(table.bar.prox$Cluster, levels=cluster.levels)
+
+my_col = list(Mock.proximal = "lightsteelblue1", Infected.proximal = "dodgerblue3")
+
+p3 <- ggplot(table.bar.prox, aes(Cluster, Percentage, fill=factor(Condition))) + geom_bar(stat = "identity",  width = 0.4, position=position_dodge(width = 0.5)) + scale_fill_manual(values=my_col) + theme_bw() + ylim(0, 25) + ggtitle("Proximal") + theme(axis.text.x = element_text(angle = 45, vjust = 0.8, hjust= 0.8))
+
+# distal
+table.bar.dis <- table.bar %>% select(cluster, contains("distal"))
+table.bar.dis <- melt(table.bar.dis)
+colnames(table.bar.dis) <- c("Cluster", "Condition", "Percentage")
+table.bar.dis$Cluster <- factor(table.bar.dis$Cluster, levels=cluster.levels)
+
+my_col = list(Mock.distal = "darkolivegreen1", Infected.distal = "seagreen4")
+
+p4 <- ggplot(table.bar.dis, aes(Cluster, Percentage, fill=factor(Condition))) + geom_bar(stat = "identity",  width = 0.4, position=position_dodge(width = 0.5)) + scale_fill_manual(values=my_col) + theme_bw() + ylim(0, 25) + ggtitle("Distal") + theme(axis.text.x = element_text(angle = 45, vjust = 0.8, hjust= 0.8))
+
+p3 / p4 # 4 x 6
+```
+
+(p3 + p1) / (p4 + p2) + plot_layout(guides = "collect") #8x5.5
+
+
+# bar plot (Mock)
+```{r}
+# proximal vs distal
+table.bar <- rownames_to_column(as.data.frame(t(table)), var="cluster")
+
+table.bar <- table.bar %>% select(cluster, contains("Mock"))
+table.bar <- melt(table.bar)
+colnames(table.bar) <- c("Cluster", "Condition", "Percentage")
+table.bar$Cluster <- factor(table.bar$Cluster, levels=cluster.levels)
+
+my_col = list(Mock.proximal = "lightsteelblue1", Mock.distal = "olivedrab1")
+
+p3 <- ggplot(table.bar, aes(Cluster, Percentage, fill=factor(Condition))) + geom_bar(stat = "identity",  width = 0.4, position=position_dodge(width = 0.5)) + scale_fill_manual(values=my_col) + theme_bw() + ylim(0, 20) + theme(axis.text.x = element_text(angle = 45, vjust = 0.8, hjust= 0.8))
+
+# proximal vs distal
+table.bar <- rownames_to_column(as.data.frame(t(table)), var="cluster")
+
+table.bar <- table.bar %>% select(cluster, contains("Infected"))
+table.bar <- melt(table.bar)
+colnames(table.bar) <- c("Cluster", "Condition", "Percentage")
+table.bar$Cluster <- factor(table.bar$Cluster, levels=cluster.levels)
+
+my_col = list(Infected.proximal = "dodgerblue2", Infected.distal = "seagreen4")
+
+p4 <- ggplot(table.bar, aes(Cluster, Percentage, fill=factor(Condition))) + geom_bar(stat = "identity",  width = 0.4, position=position_dodge(width = 0.5)) + scale_fill_manual(values=my_col) + theme_bw() + ylim(0, 20) + theme(axis.text.x = element_text(angle = 45, vjust = 0.8, hjust= 0.8))
+
+p3 / p4 # 5 x 5
+```
+
+
+
+
+
+
+###### figures ######
+
+# pie chart 
+```{r}
+table.mp <- Mock.proximal
+table.ip <- Infected.proximal
+
+p1 <- ggplot(as.data.frame(table.mp), aes(x="", y=Freq, fill=Var1)) + geom_bar(stat="identity", width=1, color='black') + coord_polar("y", start=0) + geom_text(aes(label = paste0(Freq, "%")), position = position_stack(vjust = 0.5)) + theme_classic() + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), plot.title = element_text(hjust = 0.5, color = "#666666")) + labs(x = NULL, y = NULL, fill = NULL, title = "Control")
+
+p2 <- ggplot(as.data.frame(table.ip), aes(x="", y=Freq, fill=Var1)) + geom_bar(stat="identity", width=1, color='black') + coord_polar("y", start=0) + geom_text(aes(label = paste0(Freq, "%")), position = position_stack(vjust = 0.5)) + theme_classic() + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), plot.title = element_text(hjust = 0.5, color = "#666666")) + labs(x = NULL, y = NULL, fill = NULL, title = "Infected")
+
+gridExtra::grid.arrange(p1,p2,nrow=1) # 6x12
+```
+
+# change colors (with pals)
+```{r}
+library(pals)
+library(scCustomize)
+
+n = length(unique(data.combined.sct$seurat_clusters))
+DiscretePalette(n, palette = "polychrome") -> colors
+my_col >- kelly(n)
+
+p1 <- ggplot(as.data.frame(table.mp), aes(x="", y=Freq, fill=Var1)) + geom_bar(stat="identity", width=1, color='black') + coord_polar("y", start=0) + geom_text(aes(label = paste0(Freq, "%")), position = position_stack(vjust = 0.5)) + theme_classic() + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), plot.title = element_text(hjust = 0.5, color = "#666666")) + scale_fill_manual(values=my_col) + labs(x = NULL, y = NULL, fill = NULL, title = "Control")
+
+p2 <- ggplot(as.data.frame(table.ip), aes(x="", y=Freq, fill=Var1)) + geom_bar(stat="identity", width=1, color='black') + coord_polar("y", start=0) + geom_text(aes(label = paste0(Freq, "%")), position = position_stack(vjust = 0.5)) + theme_classic() + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), plot.title = element_text(hjust = 0.5, color = "#666666")) + scale_fill_manual(values=my_col) + labs(x = NULL, y = NULL, fill = NULL, title = "Infected")
+
+gridExtra::grid.arrange(p1,p2,nrow=1) # 6x12
+```
+
+# change colors (with scCustomize)
+```{r}
+library(scCustomize)
+
+n = length(unique(Idents(data.combined.sct)))
+my_col <- DiscretePalette_scCustomize(num_colors = n, palette = "varibow", shuffle_pal = TRUE, seed = 123)
+
+p1 <- ggplot(as.data.frame(table.mp), aes(x="", y=Freq, fill=Var1)) + geom_bar(stat="identity", width=1, color='black') + coord_polar("y", start=0) + geom_text(aes(label = paste0(Freq, "%")), position = position_stack(vjust = 0.5)) + theme_classic() + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), plot.title = element_text(hjust = 0.5, color = "#666666")) + scale_fill_manual(values=my_col) + labs(x = NULL, y = NULL, fill = NULL, title = "Control")
+
+p2 <- ggplot(as.data.frame(table.ip), aes(x="", y=Freq, fill=Var1)) + geom_bar(stat="identity", width=1, color='black') + coord_polar("y", start=0) + geom_text(aes(label = paste0(Freq, "%")), position = position_stack(vjust = 0.5)) + theme_classic() + theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), plot.title = element_text(hjust = 0.5, color = "#666666")) + scale_fill_manual(values=my_col) + labs(x = NULL, y = NULL, fill = NULL, title = "Infected")
+
+gridExtra::grid.arrange(p1,p2,nrow=1) # 6x12
+```
+
+

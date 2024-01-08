@@ -1,0 +1,635 @@
+---
+title: "20220316_scRNAseq_CtrlvsInfected_SCT"
+output: html_document
+date: '2022-03-16'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(Seurat)
+library(limma)
+library(tidyverse)
+library(patchwork)
+library(scCustomize)
+```
+
+# load the object
+```{r}
+# Load the split seurat object into the environment
+data.combined.sct <- readRDS("data/After_doublet_remover/data.seurat.sct.PrepSCTFindMarkers_custom_mt20.rds")
+```
+
+
+###### Identify differential expressed genes across conditions ######
+
+# create new ident
+```{r}
+data.combined.sct$seurat_clusters <- data.combined.sct$integrated_snn_res.0.4
+
+data.combined.sct$group <- data.combined.sct$seurat_clusters.ann
+data.combined.sct$group.condition <- paste(data.combined.sct$group, data.combined.sct$orig.ident, sep = "_") # create a new ident containing cluster and condition information
+
+# switch ident
+Idents(data.combined.sct) <- "group.condition"
+```
+
+# preprocessing (skip this step if you already did it)
+```{r}
+#data.combined.sct <- PrepSCTFindMarkers(data.combined.sct, verbose = TRUE) # The counts slot of the SCT assay is replaced with recorrected counts and the data slot is replaced with log1p of recorrected counts. Corrected counts are obtained by setting the sequencing depth for all the cells to a fixed value and reversing the learned regularized negative-binomial regression model.
+```
+
+# save the object (skip this step if you already did it)
+```{r}
+# Save the seurat object
+#saveRDS(data.combined.sct, "data/After_doublet_remover/data.seurat.sct.PrepSCTFindMarkers_custom_mt20.rds")
+```
+
+# expression table
+```{r}
+# create table with gene expression level (matrix with genes as rows, cells as columns)
+DefaultAssay(data.combined.sct) <- "SCT"
+
+as.matrix(GetAssayData(data.combined.sct, slot = "data")) -> table
+
+# table with cluster's average gene expression level (matrix with genes as rows, clusters as columns)
+cluster = 3 # cluster number of your interest
+
+data.combined.sct.sub <- subset(data.combined.sct, subset = seurat_clusters == cluster)
+Idents(data.combined.sct.sub) <- "orig.ident"
+
+table.avr <- as.data.frame(AverageExpression(data.combined.sct.sub, assay = "SCT", slot = "data", group.by = "ident", return.seurat = FALSE, verbose = FALSE))
+
+table.avr = rownames_to_column(table.avr, var = "gene")
+
+write.csv(table.avr, "average_expression.csv", row.names = F, quote = F)
+```
+
+# load gene information
+```{r}
+library(stringr)
+library(rtracklayer)
+
+gtf <- import("/Users/yukohasegawa/Desktop/mm10_reference/gencode.vM25.annotation.gtf")
+
+gtf.df <- as.data.frame(gtf)
+geneID <- subset(gtf.df, type=="gene")[,c("gene_name","seqnames")]
+```
+
+# DE analysis (specific cluster)
+```{r}
+DefaultAssay(data.combined.sct) <- "SCT"
+
+cluster = 0 # cluster number of your interest
+
+conditions = unique(data.combined.sct$orig.ident) 
+
+target.group = paste(cluster, conditions[4], sep="_")
+ctrl.group = paste(cluster, conditions[2], sep="_")
+
+degs <- FindMarkers(data.combined.sct, assay = "SCT", ident.1 = target.group, ident.2 = ctrl.group, verbose = TRUE)
+
+rownames_to_column(degs, var = "gene") -> degs
+colnames(degs) <- c("gene","p_val.de","avg_log2FC.de", paste("pct", conditions[2], sep="."), paste("pct", conditions[1], sep="."), "p_val_adj.de")
+
+filename = paste0("degs_", "cluster", cluster, ".csv")
+write.csv(degs, filename, row.names = F, quote = F)
+```
+
+# DE analysis (all clusters)
+```{r}
+# create function to get conserved markers for any given cluster
+get_degs <- function(group, sample, ctrl){
+  FindMarkers(data.combined.sct,
+              assay = "SCT",
+              ident.1 = paste(group, sample, sep="_"),
+              ident.2 = paste(group, ctrl, sep="_"),
+              grouping.var = "orig.ident",
+              verbose = TRUE) %>% 
+    rownames_to_column(var = "gene") %>%
+    add_column(cluster = group)
+}
+
+
+# proximal
+sample = "Infected.prox"
+ctrl = "Mock.prox"
+groupnames = levels(data.combined.sct$seurat_clusters.ann)
+n = length(groupnames)
+argList <- list(groupnames, rep(sample, n), rep(ctrl, n))
+degs.all <- pmap_dfr(argList, get_degs)
+
+# edit column names
+colnames(degs.all) <- c("gene", "p_val.de", "avg_log2FC.de", paste("pct", sample, sep="."), paste("pct", ctrl, sep="."), "p_val_adj.de", "cluster")
+
+# add chromosome
+degs.all <- left_join(degs.all, geneID, by=join_by(gene==gene_name), relationship = "many-to-many")[,c(1,8,2:7)]
+
+# write the result
+write.csv(degs.all, "degs_allclusters_proximal_custom_mt20.csv", quote = F, row.names=F)
+
+
+# distal
+sample = "Infected.dis"
+ctrl = "Mock.dis"
+groupnames = levels(data.combined.sct$seurat_clusters.ann)
+n = length(groupnames)
+argList <- list(groupnames, rep(sample, n), rep(ctrl, n))
+degs.all <- pmap_dfr(argList, get_degs)
+
+# edit column names
+colnames(degs.all) <- c("gene", "p_val.de", "avg_log2FC.de", paste("pct", sample, sep="."), paste("pct", ctrl, sep="."), "p_val_adj.de", "cluster")
+
+# add chromosome
+degs.all <- left_join(degs.all, geneID, by=join_by(gene==gene_name), relationship = "many-to-many")[,c(1,8,2,6,3:5,7)]
+
+# write the result
+write.csv(degs.all, "degs_allclusters_distal_custom_mt20.csv", quote = F, row.names=F)
+
+
+# proximal vs distal, mock
+sample = "Mock.dis"
+ctrl = "Mock.prox"
+groupnames = levels(data.combined.sct$seurat_clusters.ann)
+n = length(groupnames)
+argList <- list(groupnames, rep(sample, n), rep(ctrl, n))
+degs.all <- pmap_dfr(argList, get_degs)
+
+# edit column names
+colnames(degs.all) <- c("gene", "p_val.de", "avg_log2FC.de", paste("pct", sample, sep="."), paste("pct", ctrl, sep="."), "p_val_adj.de", "cluster")
+
+# add chromosome
+degs.all <- left_join(degs.all, geneID, by=join_by(gene==gene_name), relationship = "many-to-many")[,c(1,8,2,6,3:5,7)]
+
+# write the result
+write.csv(degs.all, "degs_allclusters_proxdis_custom_mt20.csv", quote = F, row.names=F)
+```
+
+
+##### figures ######
+
+# load the object
+```{r}
+# Load the split seurat object into the environment
+data.combined.sct <- readRDS("data/After_doublet_remover/data.seurat.sct.PrepSCTFindMarkers_custom.rds")
+
+# switch clusters
+data.combined.sct$seurat_clusters <- data.combined.sct$integrated_snn_res.0.4
+
+data.combined.sct$group <- data.combined.sct$seurat_clusters
+data.combined.sct$group.condition <- paste(data.combined.sct$group, data.combined.sct$orig.ident, sep = "_") # create a new ident containing cluster and condition information
+
+# switch ident
+Idents(data.combined.sct) <- "group.condition"
+```
+
+# load DE results
+```{r}
+degs.prox <- read.csv("../20230825_Infant_VC_P5_EpiscRNAseq_mt_filter_20/degs_allclusters_proximal_custom_mt20.csv")
+
+degs.dis <- read.csv("../20230825_Infant_VC_P5_EpiscRNAseq_mt_filter_20/degs_allclusters_distal_custom_mt20.csv")
+
+degs.proxdis <- read.csv("../20230825_Infant_VC_P5_EpiscRNAseq_mt_filter_20/degs_allclusters_proxdis_custom_mt20.csv")
+```
+
+# change the class of the cluster to factor
+```{r}
+degs.prox$cluster <- paste0("cluster", degs.prox$cluster)
+degs.dis$cluster <- paste0("cluster", degs.dis$cluster)
+
+cluster <- unique(degs.prox$cluster)
+
+degs.prox$cluster <- factor(degs.prox$cluster, levels=cluster)
+degs.dis$cluster <- factor(degs.dis$cluster, levels=cluster)
+```
+
+# volcano
+```{r}
+## proximal
+# check max and min log2(FC) and assign the values to variables
+round(max(degs.prox$avg_log2FC.de), 1)
+round(min(degs.prox$avg_log2FC.de), 1)
+
+x.min <- -4
+x.max <- 6
+
+volcano.list <- list()
+
+for(cluster.id in cluster){
+  volcano.list[[cluster.id]] <- ggplot(subset(degs.prox, cluster == cluster.id), aes(avg_log2FC.de, -log10(p_val_adj.de))) + geom_point(size=0.5) + theme_bw() + xlim(x.min, x.max) + ggtitle(cluster.id) + xlab("-Log2(Fold Change)") + ylab("-Log10(Adjusted p-value)") + geom_hline(yintercept=2, linetype=2, color = "firebrick2")
+}
+
+wrap_plots(volcano.list) # 10 x 12
+
+
+## distal
+# check max and min log2(FC) and assign the values to variables
+round(max(degs.dis$avg_log2FC.de), 1)
+round(min(degs.dis$avg_log2FC.de), 1)
+
+x.min <- -2
+x.max <- 8
+
+volcano.list <- list()
+
+for(cluster.id in cluster){
+  volcano.list[[cluster.id]] <- ggplot(subset(degs.dis, cluster == cluster.id), aes(avg_log2FC.de, -log10(p_val_adj.de))) + geom_point(size=0.5) + theme_bw() + xlim(x.min, x.max) + ggtitle(cluster.id) + xlab("-Log2(Fold Change)") + ylab("-Log10(Adjusted p-value)") + geom_hline(yintercept=2, linetype=2, color = "firebrick2")
+}
+
+wrap_plots(volcano.list) # 10 x 12
+```
+
+
+# cumulative curve of DEGs
+```{r}
+my_col <- DiscretePalette_scCustomize(num_colors = length(cluster), palette = "polychrome")
+
+degs.prox.sub <- subset(degs.prox, p_val_adj.de < 0.05)
+degs.dis.sub <- subset(degs.dis, p_val_adj.de < 0.05)
+
+ggplot(degs.prox.sub, aes(-log10(p_val_adj.de), color=cluster)) + 
+       stat_ecdf(geom = "step", size=1) + 
+       labs(x="-Log10(adjusted p-value)", y="%") +
+       scale_y_continuous(breaks=seq(0,1,0.1), labels = seq(0,100,10)) + 
+       scale_color_manual(values=my_col) + 
+       theme_minimal()
+
+ggplot(degs.prox.sub, aes(log2(avg_log2FC.de), color=cluster)) + 
+       stat_ecdf(geom = "step", size=1) + 
+       labs(x="-Log10(adjusted p-value)", y="%") +
+       scale_y_continuous(breaks=seq(0,1,0.1), labels = seq(0,100,10)) + 
+       scale_color_manual(values=my_col) + 
+       theme_minimal()
+
+
+ggplot(degs.dis.sub, aes(-log10(p_val_adj.de), color=cluster)) + 
+       stat_ecdf(geom = "step", size=1) + 
+       labs(x="-Log10(adjusted p-value)", y="%") +
+       scale_y_continuous(breaks=seq(0,1,0.1), labels = seq(0,100,10)) + 
+       scale_color_manual(values=my_col) + 
+       theme_minimal()
+```
+
+
+
+
+# comparison with bulk RNA-seq data
+```{r}
+bulk <- read.delim("/Users/yukohasegawa/Desktop/4_DESeq2/DESeq2_results/results_combined.srnk.txt")
+
+cutoff <- 0.01 # p-value cutoff
+
+# single-cell proximal DEGs
+degs.prox.sc.up <- unique(subset(degs.prox, p_val_adj.de < cutoff & avg_log2FC.de > 0)$gene)
+
+degs.prox.sc.down <- unique(subset(degs.prox, p_val_adj.de < cutoff & avg_log2FC.de < 0)$gene)
+
+# single-cell distal DEGs
+degs.dis.sc.up <- unique(subset(degs.dis, p_val_adj.de < cutoff & avg_log2FC.de > 0)$gene)
+
+degs.dis.sc.down <- unique(subset(degs.dis, p_val_adj.de < cutoff & avg_log2FC.de < 0)$gene)
+
+# bulk RNA-seq proximal DEGs
+degs.prox.bulk.up <- unique(subset(bulk, padj.wt.prox < cutoff & log2FC.wt.prox > 0)$gene_name)
+degs.prox.bulk.down <- unique(subset(bulk, padj.wt.prox < cutoff & log2FC.wt.prox < 0)$gene_name)
+
+# bulk RNA-seq distal DEGs
+degs.dis.bulk.up <- unique(subset(bulk, padj.wt.dis < cutoff & log2FC.wt.dis > 0)$gene_name)
+degs.dis.bulk.down <- unique(subset(bulk, padj.wt.dis < cutoff & log2FC.wt.dis < 0)$gene_name)
+
+## Venn diagram
+library(eulerr)
+
+cols <- c("dodgerblue2", "magenta3") # color setting
+
+degs.up.list <- list(degs.prox.bulk.up, degs.prox.sc.up, degs.dis.bulk.up, degs.dis.sc.up)
+
+names(degs.up.list) <- c("Proximal.bulk", "Proximal.sc", "Distal.bulk", "Distal.sc")
+
+degs.down.list <- list(degs.prox.bulk.down, degs.prox.sc.down, degs.dis.bulk.down, degs.dis.sc.down)
+
+names(degs.down.list) <- c("Proximal.bulk", "Proximal.sc", "Distal.bulk", "Distal.sc")
+
+# up
+test <- euler(degs.up.list[1:2], shape = "ellipse") # change the number in degs.up.list[] to specify the data you want to use
+
+plot(test, fills = list(fill = cols, alpha = 0.7), quantities = list(type = c("percent", "counts"))) 
+
+# down
+test <- euler(degs.down.list[1:2], shape = "ellipse") # change the number in degs.down.list[] to specify the data you want to use
+
+plot(test, fills = list(fill = cols, alpha = 0.7), quantities = list(type = c("percent", "counts")))
+
+
+## add information to bulk data
+
+# add column to bulk data
+bulk <- bulk %>% mutate(sc_prox = case_when(
+  gene_name %in% degs.prox.bulk.up & gene_name %in% degs.prox.sc.up ~ "Yes_up",
+  gene_name %in% degs.prox.bulk.down & gene_name %in% degs.prox.sc.down ~ "Yes_down",
+  gene_name %in% degs.prox.bulk.up & !(gene_name %in% degs.prox.sc.up) ~ "No_up",
+  gene_name %in% degs.prox.bulk.down & !(gene_name %in% degs.prox.sc.down) ~ "No_down",
+  .default = "Not DEGs"
+))
+
+table(bulk$class, bulk$sc_prox)
+
+
+bulk <- bulk %>% mutate(sc_dis = case_when(
+  gene_name %in% degs.dis.bulk.up & gene_name %in% degs.dis.sc.up ~ "Yes_up",
+  gene_name %in% degs.dis.bulk.down & gene_name %in% degs.dis.sc.down ~ "Yes_down",
+  gene_name %in% degs.dis.bulk.up & !(gene_name %in% degs.dis.sc.up) ~ "No_up",
+  gene_name %in% degs.dis.bulk.down & !(gene_name %in% degs.dis.sc.down) ~ "No_down",
+  .default = "Not DEGs"
+))
+
+table(bulk$class, bulk$sc_dis)
+
+
+# write the result
+write.csv(bulk, "bulk_vs_csRNA.csv", quote = F, row.names=F)
+
+
+
+# TPM figure
+bulk.tpm <- read.delim("/Users/yukohasegawa/Desktop/4_DESeq2/DESeq2_results/results_TPM_RPKM.txt")
+
+# add column to bulk.tpm data
+bulk.tpm <- left_join(bulk.tpm, bulk[,c("geneid", "sc_prox", "sc_dis")])
+
+# violin plot 
+prox <- ggplot(bulk.tpm, aes(factor(sc_prox), log10(TPM.Mock.prox))) + geom_violin(aes(fill = factor(sc_prox))) + theme_classic() + scale_fill_manual(values=c("grey", "dodgerblue1"))
+
+dis <- ggplot(bulk.tpm, aes(factor(sc_dis), log10(TPM.Mock.dis))) + geom_violin(aes(fill = factor(sc_dis))) + theme_classic() + scale_fill_manual(values=c("grey", "dodgerblue1"))
+
+prox + dis + plot_layout(guides = "collect") # 3 x 6
+
+wilcox.test(subset(bulk.tpm, grepl("No", sc_prox))$TPM.Mock.prox, subset(bulk.tpm, grepl("Yes", sc_prox))$TPM.Mock.prox)
+
+wilcox.test(subset(bulk.tpm, grepl("No", sc_dis))$TPM.Mock.dis, subset(bulk.tpm, grepl("Yes", sc_dis))$TPM.Mock.dis)
+```
+
+
+
+
+
+
+# proximal
+```{r}
+degs.list.prox <- subset(degs.prox, avg_log2FC.de > 1 & p_val_adj.de < 10^-3 & !seqnames %in% c("chrX", "chrY"))$gene
+
+genes <- unique(degs.list.prox)
+
+genes <- genes[!grepl("Rpl|Rps", genes)]
+
+# dotplot
+dp1 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Mock.prox"), features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+dp2 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Infected.prox"), features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+dp1 + dp2
+
+# violinplot
+mycols = c(Mock.prox="lightblue", Infected.prox="dodgerblue3", Mock.dis="darkolivegreen1", Infected.dis="seagreen4")
+
+VlnPlot(subset(x=data.combined.sct, subset = orig.ident %in% c("Mock.prox", "Infected.prox")), features = genes[5], split.by = "orig.ident", cols = mycols[1:2])
+
+VlnPlot(subset(x=data.combined.sct, subset = orig.ident == "Infected.prox"), features = genes[1:3], split.by = "orig.ident")
+
+# heatmap
+library(viridis)
+
+png(file = "Heatmap_T-cell_subclusters.png", # The directory you want to save the file in
+    width = 14, # The width of the plot in inches
+    height = 7,
+    unit = "in",
+    res = 300)
+
+DoHeatmap(subset(x=data.combined.sct, subset = orig.ident =="Mock.prox"), features = genes) + scale_fill_viridis(option="magma")
+
+DoHeatmap(subset(x=data.combined.sct, subset = orig.ident =="Infected.prox"), features = genes) + scale_fill_viridis(option="magma")
+
+dev.off()
+```
+
+# feature plot (prox)
+```{r}
+#Idents(data.combined.sct) <- "seurat_clusters"
+DefaultAssay(data.combined.sct) <- "SCT"
+
+# choose genes
+genes <- subset(degs.prox, abs(avg_log2FC.de) > 1 & p_val_adj.de < 0.01)
+
+genes <- subset(degs.prox, abs(avg_log2FC.de) > 1 & p_val_adj.de < 0.001 & !(seqnames %in% c("chrX", "chrY")))$gene %>% unique()
+
+FeaturePlot_scCustom(data.combined.sct, features = c("Hdac9"), slot = "data", order = F, num_columns=4, split.by = "orig.ident", na_color = "lightgray") & theme(legend.position = "right")
+
+FeaturePlot_scCustom(data.combined.sct, features = c("Il1r1","Il22"), slot = "data", order = F, num_columns=4, split.by = "orig.ident", na_color = "lightgray") & theme(legend.position = "right") & scale_color_gradientn(colors = plasma(n = 10, direction = -1), limits = c(0, 5))
+```
+
+```{r}
+library(viridis)
+
+# RidgePlot
+RidgePlot(data.combined.sct, features = c("Acod1"), group.by = "integrated_snn_res.1")
+
+# Violin plot
+Idents(data.combined.sct) <- "integrated_snn_res.1"
+data.combined.sct$orig.ident <- factor(data.combined.sct$orig.ident, levels=c("Mock.prox", "Infected.prox", "Mock.dis", "Infected.dis"))
+
+mycols = c(Mock.prox="lightblue", Infected.prox="dodgerblue3", Mock.dis="darkolivegreen1", Infected.dis="seagreen4")
+
+VlnPlot(data.combined.sct, features = c("Hilpda"), slot = "data", group.by = "integrated_snn_res.1", split.by="orig.ident", idents = c(6,9,13,25), pt.size = 0) + scale_fill_manual(values=mycols) + scale_y_continuous(limits = c(0,3))
+
+Stacked_VlnPlot(data.combined.sct, features = c("Il1r1","Il22"), x_lab_rotate = TRUE, split.by = "orig.ident", idents = c(6,9,13,25), plot_legend = T, colors_use = mycols, pt.size = 0)
+
+Stacked_VlnPlot(data.combined.sct, features = genes, x_lab_rotate = TRUE, split.by = "orig.ident", plot_legend = T, colors_use = mycols, pt.size = 0)
+
+# heatmap
+DoHeatmap(data.combined.sct, features = c("Il1r1","Il22"), group.by = "integrated_snn_res.1") + scale_fill_viridis()
+
+n = length(unique(data.combined.sct$integrated_snn_res.1))
+
+my_col <- DiscretePalette_scCustomize(num_colors = n, palette = "polychrome", shuffle_pal = TRUE, seed = 123)
+
+Idents(data.combined.sct) <- "orig.ident"
+mock.prox.cells <- WhichCells(data.combined.sct, idents = "Mock.prox")
+infected.prox.cells <- WhichCells(data.combined.sct, idents = "Infected.prox")
+
+DoHeatmap(data.combined.sct, features = genes, slot = "scale.data", cells=mock.prox.cells, group.by = "integrated_snn_res.1", group.colors = my_col, draw.lines=T) + scale_fill_viridis(option="viridis", na.value = "white")
+
+DoHeatmap(data.combined.sct, features = genes, slot = "scale.data", cells=infected.prox.cells, group.by = "integrated_snn_res.1", group.colors = my_col, draw.lines=T) + scale_fill_viridis(option="viridis", na.value = "white")
+
+
+Idents(data.combined.sct) <- "integrated_snn_res.1"
+cells <- WhichCells(data.combined.sct, idents = c(6,9,13))
+
+DoHeatmap(data.combined.sct, features = c("Il1r1","Il22", "Il17a"), slot = "scale.data", cells=cells, group.by = "orig.ident", group.colors = my_col, draw.lines=T) + scale_fill_viridis(option="viridis", na.value = "white")
+
+
+# dotplot
+dp1 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Mock.prox"), features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+dp2 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Infected.prox"), features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Mock.dis"), features = c("Il1r1","Il22", "Il17a"), flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Infected.dis"), features = c("Il1r1","Il22", "Il17a"), flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+```
+
+
+# distal
+```{r}
+degs.list.dis <- degs.dis %>% arrange(desc(p_val_adj.de)) %>% subset(avg_log2FC.de > 2 & p_val_adj.de < 10^-3 & !seqnames %in% c("chrX", "chrY")) %>% select(gene)
+
+genes <- unique(degs.list.dis$gene)
+
+genes <- genes[!grepl("Rpl|Rps", genes)]
+
+# dotplot
+DotPlot(data.combined.sct, features=genes[1:10], dot.scale=10, split.by="orig.ident", cols="RdBu")
+
+
+dp1 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident %in% c("Mock.dis", "Infected.dis")), features = genes[1:10], flip_axes = T, x_lab_rotate = TRUE, split.by="orig.ident", colors_use=viridis_light_high)
+
+dp2 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Infected.dis"), features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+dp1 + dp2 # 20 x 10
+
+# dotplot (proximal)
+dp1 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Mock.prox"), features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+dp2 <- DotPlot_scCustom(subset(x=data.combined.sct, subset = orig.ident =="Infected.prox"), features = genes, flip_axes = T, x_lab_rotate = TRUE, colors_use=viridis_light_high)
+
+dp1 + dp2 # 20 x 10
+
+
+
+# violinplot
+mycols = c(Mock.prox="lightblue", Infected.prox="dodgerblue3", Mock.dis="darkolivegreen1", Infected.dis="seagreen4")
+
+Stacked_VlnPlot(seurat_object = data.combined.sct, features = genes[1:5], x_lab_rotate = TRUE, colors_use = mycols, split.by = "orig.ident")
+
+VlnPlot(subset(x=data.combined.sct, subset = orig.ident %in% c("Mock.prox", "Infected.prox")), features = genes[5], split.by = "orig.ident", cols = mycols[1:2])
+
+VlnPlot(subset(x=data.combined.sct, subset = orig.ident == "Infected.prox"), features = genes[1:3], split.by = "orig.ident")
+
+
+
+
+
+# heatmap
+library(viridis)
+
+png(file = "Heatmap_T-cell_subclusters.png", # The directory you want to save the file in
+    width = 14, # The width of the plot in inches
+    height = 7,
+    unit = "in",
+    res = 300)
+
+DoHeatmap(subset(x=data.combined.sct, subset = orig.ident =="Mock.prox"), features = genes) + scale_fill_viridis(option="magma")
+
+DoHeatmap(subset(x=data.combined.sct, subset = orig.ident =="Infected.prox"), features = genes) + scale_fill_viridis(option="magma")
+
+dev.off()
+```
+
+# feature plot (dis)
+```{r}
+#Idents(data.combined.sct) <- "seurat_clusters"
+DefaultAssay(data.combined.sct) <- "SCT"
+
+# choose genes
+genes <- subset(degs.prox, abs(avg_log2FC.de) > 1 & p_val_adj.de < 0.01)
+
+genes <- subset(degs.prox, abs(avg_log2FC.de) > 1 & p_val_adj.de < 0.001 & !(seqnames %in% c("chrX", "chrY")))$gene %>% unique()
+
+FeaturePlot_scCustom(data.combined.sct, features = c("Il22"), slot = "data", order = F, num_columns=4, split.by = "orig.ident", na_color = "lightgray") & theme(legend.position = "right")
+
+FeaturePlot_scCustom(data.combined.sct, features = c("Il1r1","Il22"), slot = "data", order = F, num_columns=4, split.by = "orig.ident", na_color = "lightgray") & theme(legend.position = "right") & scale_color_gradientn(colors = plasma(n = 10, direction = -1), limits = c(0, 5))
+```
+
+
+
+
+
+
+
+
+
+# confirm the expression pattern of DEGs (prox vs dis)
+```{r}
+#Idents(data.combined.sct) <- "seurat_clusters"
+DefaultAssay(data.combined.sct) <- "SCT"
+
+# DEGs
+genes <- subset(degs_proxdis, abs(avg_log2FC.de) > 1.5 & p_val_adj.de < 0.001 & (abs(pct.Mock.dis - pct.Mock.prox) > 0.4))$gene %>% unique()
+
+genes <- subset(degs_proxdis, abs(avg_log2FC.de) > 1.5 & p_val_adj.de < 0.001)$gene %>% unique()
+
+
+# feature plot
+FeaturePlot_scCustom(data.combined.sct, features = genes, slot = "data", order = F, num_columns=4, split.by = "orig.ident") & theme(legend.position = "right") # data contains log-transformed version of counts #15x20
+```
+
+# combine the DE result with cluster markers
+```{r}
+c.markers.all <- read.csv("/Volumes/TOSHIBA/20230601_Infant_VC_P5_scRNAseq/all_cluster_markers_mod_r1.0.csv", header=TRUE)
+
+c.markers.all$cluster <- as.character(c.markers.all$cluster)
+
+degs.all <- read.csv("/Volumes/TOSHIBA/20230601_Infant_VC_P5_scRNAseq/degs_allclusters_distal.csv", header=TRUE)
+
+degs.all$cluster <- as.character(degs.all$cluster)
+
+# combine the DE results with the marker gene list
+degs.markers <- left_join(degs.all, c.markers.all)
+
+# write the result
+write.csv(degs.markers, "degs_markers.csv", quote = F, row.names=F)
+```
+
+
+# Dot plot (fraction of the cells expressing the marker genes)
+```{r}
+library(cowplot)
+library(ggtree)
+library(aplot)
+
+DefaultAssay(data.combined.sct) <- "SCT"
+
+# switch ident
+Idents(data.combined.sct) <- "group.condition"
+
+# choose genes
+genes <- subset(degs.markers, avg_log2FC.de > 2 & p_val_adj.de < 0.01)$gene %>% unique()
+#genes <- subset(degs.markers, avg_log2FC.de > 2 & p_val_adj.de < 0.01 & (pct.Infected.dis - pct.Mock.dis > 0.4))$gene %>% unique()
+
+genes <- subset(degs.markers, avg_log2FC.de > 2 & p_val_adj.de < 0.01)$gene %>% unique()
+
+# standard Dot plot (scale=T, values are scaled)
+DotPlot(data.combined.sct, features = genes, scale = T, dot.scale = 8)
+
+# get number of cells per cluster and per condition
+cellnum <- table(data.combined.sct[[]]$orig.ident, data.combined.sct[[]]$seurat_clusters)
+
+# pull the data
+dp = DotPlot(data.combined.sct, features=genes)$data
+dp <- separate(dp, col = id, sep = "_", into = c("cluster", "condition"))
+
+# dot plot
+p1 <- dp %>% subset(condition=="Mock.dis") %>% mutate(`Percent expressed` = round(pct.exp,1)) %>% ggplot(aes(x=cluster, y = features.plot, color = avg.exp.scaled, size = `Percent expressed`)) + geom_point() + scale_size(range = c(0, 8), breaks=c(0, 25, 50, 75, 100), limits=c(0, 100)) + theme_cowplot() + theme(plot.title = element_text(hjust = 0.5, color = "#666666"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + labs(x = NULL, y = NULL, fill = NULL, title = "Control")
+
+p2 <- dp %>% subset(condition=="Infected.dis") %>% mutate(`Percent expressed` = round(pct.exp,1)) %>% ggplot(aes(x=cluster, y = features.plot, color = avg.exp.scaled, size = `Percent expressed`)) + geom_point() + scale_size(range = c(0, 8), breaks=c(0, 25, 50, 75, 100), limits=c(0, 100)) + theme_cowplot() + theme(plot.title = element_text(hjust = 0.5, color = "#666666"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + labs(x = NULL, y = NULL, fill = NULL, title = "Infected")
+
+p1 | p2
+
+# change color and adjust color scaling
+p1 <- p1 + scale_color_gradientn(colours = viridis::viridis(20), limits = c(0,2), oob = scales::squish, name = 'log2 (count + 1)')
+
+p2 <- p2 + scale_color_gradientn(colours = viridis::viridis(20), limits = c(0,2), oob = scales::squish, name = 'log2 (count + 1)')
+
+p1 | p2
+```
+

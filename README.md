@@ -46,5 +46,5 @@ The 10x Genomics Cloud CLI instruction is at the bottom of the same page. Go to 
 
 1. Download the RMarkdown files from this repository
 2. Open RStudio and open the RMarkdown files
-3. Edit the codes and Run
+3. Edit the codes and run
     

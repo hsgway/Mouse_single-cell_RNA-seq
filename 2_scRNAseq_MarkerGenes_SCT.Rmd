@@ -22,7 +22,7 @@ data.combined.sct <- readRDS("data/After_doublet_remover/data.seurat.sct_custom_
 
 data.combined.sct$seurat_clusters <- data.combined.sct$integrated_snn_res.0.4
 
-Idents(data.combined.sct) <- "seurat_clusters.ann"
+#Idents(data.combined.sct) <- "seurat_clusters.ann"
 ```
 
 
